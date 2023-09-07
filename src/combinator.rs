@@ -1689,6 +1689,48 @@ where
     }
 }
 
+/// Configuration for [`Parser::separated_by`], used in [`ConfigParser::configure`].
+#[derive(Default)]
+pub struct SeparatedByCfg {
+    at_least: Option<usize>,
+    at_most: Option<usize>,
+    allow_leading: Option<bool>,
+    allow_trailing: Option<bool>,
+}
+
+impl SeparatedByCfg {
+    /// Set the minimum number of repetitions accepted
+    pub fn at_least(mut self, n: usize) -> Self {
+        self.at_least = Some(n);
+        self
+    }
+
+    /// Set the maximum number of repetitions accepted
+    pub fn at_most(mut self, n: usize) -> Self {
+        self.at_most = Some(n);
+        self
+    }
+
+    /// Set an exact number of repetitions to accept
+    pub fn exactly(mut self, n: usize) -> Self {
+        self.at_least = Some(n);
+        self.at_most = Some(n);
+        self
+    }
+
+    /// Set whether or not to allow leading pattern to match
+    pub fn allow_leading(mut self, allow: bool) -> Self {
+        self.allow_leading = Some(allow);
+        self
+    }
+
+    /// Set whether or not to allow trailing pattern to match
+    pub fn allow_trailing(mut self, allow: bool) -> Self {
+        self.allow_trailing = Some(allow);
+        self
+    }
+}
+
 /// See [`Parser::separated_by`].
 pub struct SeparatedBy<A, B, OA, OB, I, E> {
     pub(crate) parser: A,
@@ -1969,6 +2011,83 @@ where
     }
 
     go_extra!(());
+}
+
+impl<'a, I, E, A, B, OA, OB> ConfigIterParserSealed<'a, I, OA, E>
+    for SeparatedBy<A, B, OA, OB, I, E>
+where
+    I: Input<'a>,
+    E: ParserExtra<'a, I>,
+    A: Parser<'a, I, OA, E>,
+    B: Parser<'a, I, OB, E>,
+{
+    type Config = SeparatedByCfg;
+
+    #[inline(always)]
+    fn next_cfg<M: Mode>(
+        &self,
+        inp: &mut InputRef<'a, '_, I, E>,
+        state: &mut Self::IterState<M>,
+        cfg: &Self::Config,
+    ) -> IPResult<M, OA> {
+        let at_most = cfg.at_most.map(|x| x as u64).unwrap_or(self.at_most);
+        let at_least = cfg.at_least.unwrap_or(self.at_least);
+        let allow_trailing = cfg.allow_trailing.unwrap_or(self.allow_trailing);
+        let allow_leading = cfg.allow_leading.unwrap_or(self.allow_leading);
+
+        if *state as u64 >= at_most {
+            return Ok(None);
+        }
+
+        let before_separator = inp.save();
+        if *state == 0 && allow_leading {
+            if self.separator.go::<Check>(inp).is_err() {
+                inp.rewind(before_separator);
+            }
+        } else if *state > 0 {
+            match self.separator.go::<Check>(inp) {
+                Ok(()) => {
+                    // Do nothing
+                }
+                Err(()) if *state < at_least => {
+                    inp.rewind(before_separator);
+                    return Err(());
+                }
+                Err(()) => {
+                    inp.rewind(before_separator);
+                    return Ok(None);
+                }
+            }
+        }
+
+        let before_item = inp.save();
+        match self.parser.go::<M>(inp) {
+            Ok(item) => {
+                *state += 1;
+                Ok(Some(item))
+            }
+            Err(()) if *state < at_least => {
+                // We have errored before we have reached the count,
+                // and therefore should return this error, as we are
+                // still expecting items
+                inp.rewind(before_separator);
+                Err(())
+            }
+            Err(()) => {
+                // We are not expecting any more items, so it is okay
+                // for it to fail.
+
+                // though if we don't allow trailing, we shouldn't have
+                // consumed the separator, so we need to rewind it.
+                if allow_trailing {
+                    inp.rewind(before_item);
+                } else {
+                    inp.rewind(before_separator);
+                }
+                Ok(None)
+            }
+        }
+    }
 }
 
 /// See [`IterParser::enumerate`].
